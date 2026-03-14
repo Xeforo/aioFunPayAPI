@@ -72,3 +72,5 @@ class Account:
                 if c.username == contact:
                     return c
         return None
+    
+    async def get_node(self, node_id: int)

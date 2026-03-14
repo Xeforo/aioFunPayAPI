@@ -6,9 +6,8 @@ from httpx import AsyncClient, Proxy, Cookies
 
 from ..account import Account
 from ..common.config import BASE_URL, USER_AGENT
-from ..types import Contact
+from ..common.parser import parser_executor, parse_chat_bookmarks
 
-from .events import Event, ChatBookmarksEvent
 
 Handler = Callable[..., Coroutine[Any, Any, None]]
 
@@ -18,12 +17,15 @@ class Runner:
         self._task: asyncio.Task | None = None
         self._running = False
         self._client: Optional[AsyncClient] = None
-        self._contacts_cache: Optional[list[Contact]] = None
+
+        self._chat_bookmarks_data: Optional[list[list[int]]] = []
+        self._chat_nodes_data: Dict[int, str] = {}
+
         self.account: Account = account
         self.proxy: Optional[str] = account.proxy
 
-        self.orders_counters_tag: str = "uno7nb4u"
-        self.chat_bookmarks_tag: str = "c8u4zzkm"
+        self._orders_counters_tag: str = "HelloFP!"
+        self._chat_bookmarks_tag: str = "HelloFP!"
 
     async def _get_client(self) -> AsyncClient:
         cookies = Cookies()
@@ -61,10 +63,10 @@ class Runner:
     def on_new_order(self, filter: Optional[Callable[[Any], bool]] = None):
         return self.event("new_order", filter)
 
-    async def emit(self, name: str, event: Any):
+    async def emit(self, name: str, data: Any):
         for handler, filter_func in self._handlers.get(name, []):
-            if filter_func is None or filter_func(event):
-                await handler(event)
+            if filter_func is None or filter_func(data):
+                asyncio.create_task(handler(data))
 
     async def _get_events(self):
         data = {
@@ -72,59 +74,80 @@ class Runner:
             "request": "false",
             "csrf_token": self.account.csrf_token
         }
-        if self._contacts_cache:
-            chat_bookmarks_data = []
-            for contact in self._contacts_cache:
-                append = [
-                    contact.node_id,
-                    contact.last_message_id
-                ]
-                if contact.last_read_message_id != contact.last_message_id:
-                    append.append(contact.last_read_message_id)
-                chat_bookmarks_data.append(append)
 
+        data["objects"] = [
+            {
+                "type": "orders_counters",
+                "id": str(self.account.user_id),
+                "tag": self._orders_counters_tag,
+                "data": False
+            },
+            {
+                "type": "chat_bookmarks",
+                "id": str(self.account.user_id),
+                "tag": self._chat_bookmarks_tag,
+                "data": self._chat_bookmarks_data
+            }
+        ]
 
-            data["objects"] = dumps([
-                {
-                    "type": "orders_counters",
-                    "id": str(self.account.user_id),
-                    "tag": self.orders_counters_tag,
-                    "data": False
-                },
-                {
-                    "type": "chat_bookmarks",
-                    "id": str(self.account.user_id),
-                    "tag": self.chat_bookmarks_tag,
-                    "data": chat_bookmarks_data
-                }
-            ])
-        print("Requesting events with data:", data)
         response = await self._method("post", "/runner/", data=data)
+
+        payload = response.json()
+        if payload.get("objects"):
+            for obj in payload["objects"]:
+
+                if obj["type"] == "orders_counters":
+                    self._orders_counters_tag = obj["tag"]
+
+                elif obj["type"] == "chat_bookmarks":
+                    self._chat_bookmarks_tag = obj["tag"]
+                    contact_order = obj["data"]["order"]
+
+                    loop = asyncio.get_running_loop()
+
+                    messages_dict = await loop.run_in_executor(parser_executor, parse_chat_bookmarks, obj["data"]["html"])
+                    for i, contact_id in enumerate(contact_order):
+                        message = messages_dict.get(contact_id)
+                        if message is None:
+                            contact_order[i] = [contact_id, self._chat_bookmarks_data[i][1]]
+                            continue
+                        contact_order[i] = [contact_id, message.last_message_id]
+                        if message.last_message_id != message.last_read_message_id:
+                            contact_order[i].append(message.last_read_message_id)
+
+                    self._chat_bookmarks_data = contact_order
+
+                    if self._chat_bookmarks_data:
+                        for contact_id, last_message_id, *rest in self._chat_bookmarks_data:
+                            self._chat_nodes_data[contact_id] = {
+                                "type": "chat_node",
+                                "id": f"users_{self.account.user_id}_{contact_id}",
+                            }
+
+
+                    if self._first_run:
+                        self._first_run = False
+                        return
+                    for msg in messages_dict.values():
+                        asyncio.create_task(self.emit("new_message", msg))
+
         return response
 
     async def _runner_loop(self):
         while self._running:
+            await self._get_events()
+            await asyncio.sleep(1) 
 
-            response = await self._get_events()
-            if response.status_code != 200:
-                await asyncio.sleep(2)
-                continue
-            print(response.json()) 
-            events = [
-                
-            ]
-
-            for event in events:
-                await self.emit(event["type"], event)
-
-            await asyncio.sleep(5) 
-
-    async def start(self):
+    async def start(self, wait: bool = True):
         if self._running:
             return
         self._running = True
-        self._contacts_cache = await self.account.get_contacts()
+        self._first_run = True
+
         self._task = asyncio.create_task(self._runner_loop())
+
+        if wait:
+            await self._task
 
     async def stop(self):
         if not self._running:
@@ -133,3 +156,4 @@ class Runner:
         if self._task:
             await self._task
             self._task = None
+

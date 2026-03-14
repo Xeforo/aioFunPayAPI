@@ -22,3 +22,15 @@ class Contact(BaseModel):
     username: str
     last_message_text: str
     last_message_time: str
+
+class ChatBookmarkMessage(BaseModel):
+    chat_url: str
+    node_id: int
+    last_message_id: int
+    last_read_message_id: int
+    avatar: str
+    username: str
+    text: str
+    time: str
+    unread: bool
+    
