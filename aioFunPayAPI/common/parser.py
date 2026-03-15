@@ -1,6 +1,6 @@
-import orjson, re
+import json, re
 
-from typing import Optional
+from typing import Optional, Any, cast
 from selectolax.lexbor import LexborHTMLParser
 from concurrent.futures import ThreadPoolExecutor
 
@@ -8,46 +8,99 @@ from ..types import Category, Subcategory, Contact, ChatBookmarkMessage
   
 parser_executor = ThreadPoolExecutor()
 
-def parse_account_data(html: str) -> Optional[tuple[str, float, dict]]:
+def parse_account_data(html: str) -> Optional[tuple[str, float, dict[str, Any]]]:
     tree = LexborHTMLParser(html)
-    username: Optional[str] = parse_username(tree)
-    balance: Optional[float] = parse_balance(tree)
-    appdata: Optional[dict] = parse_appdata(tree)
+    username = parse_username(tree)
+    balance = parse_balance(tree)
+    appdata = parse_appdata(tree)
+
+    if username is None or balance is None or appdata is None:
+        return None
+
     return username, balance, appdata
 
 def parse_username(tree: LexborHTMLParser) -> Optional[str]:
     node = tree.css_first("div.user-link-name")
-    return node.text() if node else None
+    return node.text(strip=True) if node and node.text() else None
 
 def parse_balance(tree: LexborHTMLParser) -> Optional[float]:
     node = tree.css_first("span.badge-balance")
-    return float(node.text().split()[0]) if node else None
+    if not node:
+        return None
 
-def parse_appdata(tree: LexborHTMLParser) -> Optional[str]:
-    node = tree.css_first("body").attributes["data-app-data"]
-    node = orjson.loads(node)
-    return node if node else None
+    text = node.text(strip=True)
+    try:
+        value = text.split()[0]
+        return float(value)
+    except (IndexError, ValueError, TypeError):
+        return None
+
+def parse_appdata(tree: LexborHTMLParser) -> Optional[dict[str, Any]]:
+    body = tree.css_first("body")
+    if not body:
+        return None
+
+    raw = body.attributes.get("data-app-data")
+    if not raw:
+        return None
+
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+
+    data = cast(dict[str, Any], parsed)
+    return data if data else None
 
 def parse_category(html: str) -> list[Category]:
     tree = LexborHTMLParser(html)
-    categories = []
+    categories: list[Category] = []
 
     for game_node in tree.css(".promo-game-item"):
         title_node = game_node.css_first(".game-title a")
-        game_title = title_node.text(strip=True)
-        game_url = title_node.attributes["href"]
-        game_id = int(game_node.css_first(".game-title").attributes["data-id"])
+        if not title_node:
+            continue
 
-        subcats = []
+        game_title = title_node.text(strip=True) or ""
+        game_url = title_node.attributes.get("href") or ""
+
+        game_id_node = game_node.css_first(".game-title")
+        if not game_id_node:
+            continue
+
+        raw_game_id = game_id_node.attributes.get("data-id")
+        if raw_game_id is None:
+            continue
+
+        try:
+            game_id = int(raw_game_id)
+        except (TypeError, ValueError):
+            continue
+
+        subcats: list[Subcategory] = []
         ul_node = game_node.css_first("ul.list-inline")
-        for li in ul_node.css("li a"):
-            subcats.append(Subcategory(
-                type="lots" if "/lots/" in li.attributes["href"] else "chips",
-                id=int(li.attributes["href"].rstrip("/").split("/")[-1]),
-                name=li.text(strip=True),
-                url=li.attributes["href"],
-                game_title=game_title
-            ))
+        if ul_node:
+            for li in ul_node.css("li a"):
+                href = li.attributes.get("href")
+                if not href:
+                    continue
+
+                subcat_type = "lots" if "/lots/" in href else "chips"
+                try:
+                    subcat_id = int(href.rstrip("/").split("/")[-1])
+                except (TypeError, ValueError):
+                    continue
+
+                subcats.append(Subcategory(
+                    type=subcat_type,
+                    id=subcat_id,
+                    name=li.text(strip=True) or "",
+                    url=href,
+                    game_title=game_title
+                ))
 
         categories.append(Category(
             id=game_id,
@@ -59,23 +112,43 @@ def parse_category(html: str) -> list[Category]:
     return categories
 
 
+def _parse_int(value: Optional[str], default: int = 0) -> int:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
 def parse_contacts(html: str) -> list[Contact]:
     tree = LexborHTMLParser(html)
 
     contacts: list[Contact] = []
 
     for node in tree.css("a.contact-item"):
-        node_id = int(node.attributes.get("data-id"))
-        last_message_id = int(node.attributes.get("data-node-msg"))
-        last_read_message_id = int(node.attributes.get("data-user-msg"))
+        node_id = _parse_int(node.attributes.get("data-id"))
+        last_message_id = _parse_int(node.attributes.get("data-node-msg"))
+        last_read_message_id = _parse_int(node.attributes.get("data-user-msg"))
 
-        username = node.css_first(".media-user-name").text(strip=True)
-        last_message_text = node.css_first(".contact-item-message").text(strip=True)
-        last_message_time = node.css_first(".contact-item-time").text(strip=True)
+        username_node = node.css_first(".media-user-name")
+        last_message_node = node.css_first(".contact-item-message")
+        last_time_node = node.css_first(".contact-item-time")
 
-        avatar_style = node.css_first(".avatar-photo").attributes.get("style", "")
-        avatar = re.search(r"url\((.*?)\)", avatar_style)
-        avatar = avatar.group(1) if avatar else ""
+        username = username_node.text(strip=True) if username_node else ""
+        last_message_text = last_message_node.text(strip=True) if last_message_node else ""
+        last_message_time = last_time_node.text(strip=True) if last_time_node else ""
+
+        avatar_style: str = ""
+        avatar_node = node.css_first(".avatar-photo")
+        if avatar_node:
+            avatar_style = avatar_node.attributes.get("style") or ""
+
+        avatar_match = re.search(r"url\((.*?)\)", avatar_style)
+        if avatar_match:
+            avatar = avatar_match.group(1)
+        else:
+            avatar = ""
 
         contacts.append(
             Contact(
@@ -100,19 +173,33 @@ def parse_chat_bookmarks(html: str) -> Optional[dict[int, ChatBookmarkMessage]]:
     if not nodes:
         return None
 
-    messages = {}
+    messages: dict[int, ChatBookmarkMessage] = {}
     for node in nodes:
-        node_id = int(node.attributes.get("data-id"))
-        last_message_id = int(node.attributes.get("data-node-msg"))
-        last_read_message_id = int(node.attributes.get("data-user-msg"))
-        username = node.css_first(".media-user-name").text(strip=True)
-        last_message_text = node.css_first(".contact-item-message").text(strip=True)
-        last_message_time = node.css_first(".contact-item-time").text(strip=True)
-        avatar_style = node.css_first(".avatar-photo").attributes.get("style", "")
-        avatar = re.search(r"url\((.*?)\)", avatar_style)
-        avatar = avatar.group(1) if avatar else ""
-        chat_url = node.attributes.get("href", "")
-        unread = "unread" in node.attributes.get("class", "")
+        node_id = _parse_int(node.attributes.get("data-id"))
+        last_message_id = _parse_int(node.attributes.get("data-node-msg"))
+        last_read_message_id = _parse_int(node.attributes.get("data-user-msg"))
+
+        username_node = node.css_first(".media-user-name")
+        last_message_node = node.css_first(".contact-item-message")
+        last_time_node = node.css_first(".contact-item-time")
+
+        username = username_node.text(strip=True) if username_node else ""
+        last_message_text = last_message_node.text(strip=True) if last_message_node else ""
+        last_message_time = last_time_node.text(strip=True) if last_time_node else ""
+
+        avatar_style: str = ""
+        avatar_node = node.css_first(".avatar-photo")
+        if avatar_node:
+            avatar_style = avatar_node.attributes.get("style") or ""
+
+        avatar_match = re.search(r"url\((.*?)\)", avatar_style)
+        if avatar_match:
+            avatar = avatar_match.group(1)
+        else:
+            avatar = ""
+
+        chat_url = node.attributes.get("href", "") or ""
+        unread = "unread" in (node.attributes.get("class", "") or "")
 
         messages[node_id] = ChatBookmarkMessage(
             chat_url=chat_url,
@@ -121,9 +208,9 @@ def parse_chat_bookmarks(html: str) -> Optional[dict[int, ChatBookmarkMessage]]:
             last_read_message_id=last_read_message_id,
             avatar=avatar,
             username=username,
-            text=last_message_text, 
+            text=last_message_text,
             time=last_message_time,
             unread=unread
         )
-    
+
     return messages

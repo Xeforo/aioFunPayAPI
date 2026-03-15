@@ -7,7 +7,7 @@ from .types import Contact
 from .common.config import BASE_URL, USER_AGENT
 from .common.parser import parse_account_data, parse_contacts, parser_executor
 
-
+ 
 class Account:
     def __init__(self, golden_key: str, proxy: Optional[str] = None):
         self.golden_key: Optional[str] = golden_key
@@ -17,13 +17,15 @@ class Account:
 
         self.username: Optional[str] = None
         self.balance: Optional[float] = None
+        self.locale: Optional[str] = None
         self.user_id: Optional[int] = None
 
         self._client: Optional[AsyncClient] = None
 
     async def _get_client(self) -> AsyncClient:
         cookies = Cookies()
-        cookies.set("golden_key", self.golden_key)
+        if self.golden_key:
+            cookies.set("golden_key", self.golden_key)
         proxy = Proxy(self.proxy) if self.proxy else None
         
         if self._client is None:
@@ -47,10 +49,17 @@ class Account:
         self.phpsessid = response.cookies.get("PHPSESSID")
 
         loop = get_running_loop()
-        self.username, self.balance, app_data = await loop.run_in_executor(parser_executor, parse_account_data, response.text)
-        self.locale = app_data["locale"]
-        self.user_id = app_data["userId"]
-        self.csrf_token = app_data["csrf-token"]
+        parsed_data = await loop.run_in_executor(parser_executor, parse_account_data, response.text)
+
+        if parsed_data is None:
+            return self
+
+        self.username, self.balance, app_data = parsed_data
+
+        if app_data:
+            self.locale = app_data.get("locale")
+            self.user_id = app_data.get("userId")
+            self.csrf_token = app_data.get("csrf-token")
 
         return self
 
@@ -67,10 +76,12 @@ class Account:
             for c in contacts:
                 if c.node_id == contact:
                     return c
-        elif isinstance(contact, str):
-            for c in contacts:
-                if c.username == contact:
-                    return c
+
+        for c in contacts:
+            if c.username == contact:
+                return c
         return None
     
-    async def get_node(self, node_id: int)
+    async def get_node(self, node_id: int) -> None:
+        # this method was not fully implemented yet in repository.
+        raise NotImplementedError("get_node() is not implemented")

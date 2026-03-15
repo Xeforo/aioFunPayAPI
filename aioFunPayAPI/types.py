@@ -7,7 +7,7 @@ class Subcategory(BaseModel):
     type: Literal["lots", "chips"]
     url: str
     game_title: str
-
+ 
 class Category(BaseModel):
     id: int
     game_title: str

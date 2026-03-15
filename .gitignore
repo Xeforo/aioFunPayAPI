@@ -1,5 +1,4 @@
 FunPayAPI
 test
 __pycache__
-test.py
-test2.py
+test*.py

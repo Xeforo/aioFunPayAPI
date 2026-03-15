@@ -12,7 +12,6 @@ class FunPay:
         self.proxy: Optional[str] = proxy
         self._client: Optional[AsyncClient] = None
 
-        # cache
         self._categories: Optional[list[Category]] = None
         self._categories_by_id: Optional[dict[int, Category]] = None
         self._categories_by_title: Optional[dict[str, Category]] = None
@@ -58,11 +57,11 @@ class FunPay:
 
     async def get_category(self, category: Union[str, int]) -> Optional[Category]:
         await self.get_all_categories()
+
         if isinstance(category, int):
-            return self._categories_by_id.get(category)
-        elif isinstance(category, str):
-            return self._categories_by_title.get(category)
-        return None
+            return self._categories_by_id.get(category) if self._categories_by_id else None
+
+        return self._categories_by_title.get(category) if self._categories_by_title else None
 
     async def get_all_subcategories(self, update_cache: bool = False) -> list[Subcategory]:
         if not update_cache and self._subcategories and self._last_subcategories_update and \
@@ -70,7 +69,7 @@ class FunPay:
             return self._subcategories
         
         categories = await self.get_all_categories()
-        subcategories = []
+        subcategories: list[Subcategory] = []
         for category in categories:
             subcategories.extend(category.subcategories)
         self._subcategories = subcategories
@@ -80,4 +79,6 @@ class FunPay:
 
     async def get_subcategory(self, id: int) -> Optional[Subcategory]:
         await self.get_all_subcategories()
+        if self._subcategories_by_id is None:
+            return None
         return self._subcategories_by_id.get(id)

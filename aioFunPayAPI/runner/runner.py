@@ -1,7 +1,6 @@
 import asyncio
 
-from json import dumps
-from typing import Callable, Any, Coroutine, Dict, List, Optional, Literal
+from typing import Callable, Any, Coroutine, Dict, List, Optional, Literal, cast
 from httpx import AsyncClient, Proxy, Cookies
 
 from ..account import Account
@@ -14,12 +13,12 @@ Handler = Callable[..., Coroutine[Any, Any, None]]
 class Runner:
     def __init__(self, account: Account):
         self._handlers: Dict[str, List[tuple[Handler, Optional[Callable[[Any], bool]]]]] = {}
-        self._task: asyncio.Task | None = None
+        self._task: Optional[asyncio.Task[None]] = None
         self._running = False
         self._client: Optional[AsyncClient] = None
 
-        self._chat_bookmarks_data: Optional[list[list[int]]] = []
-        self._chat_nodes_data: Dict[int, str] = {}
+        self._chat_bookmarks_data: List[List[int]] = []
+        self._chat_nodes_data: Dict[int, dict[str, Any]] = {}
 
         self.account: Account = account
         self.proxy: Optional[str] = account.proxy
@@ -29,7 +28,8 @@ class Runner:
 
     async def _get_client(self) -> AsyncClient:
         cookies = Cookies()
-        cookies.set("golden_key", self.account.golden_key)
+        if self.account.golden_key:
+            cookies.set("golden_key", self.account.golden_key)
 
         proxy = Proxy(self.proxy) if self.proxy else None
         if self._client is None:
@@ -56,7 +56,7 @@ class Runner:
             self._handlers.setdefault(name, []).append((func, filter))
             return func
         return decorator
-
+ 
     def on_new_message(self, filter: Optional[Callable[[Any], bool]] = None):
         return self.event("new_message", filter)
 
@@ -69,7 +69,7 @@ class Runner:
                 asyncio.create_task(handler(data))
 
     async def _get_events(self):
-        data = {
+        data: Dict[str, Any] = {
             "objects": [],
             "request": "false",
             "csrf_token": self.account.csrf_token
@@ -90,39 +90,89 @@ class Runner:
             }
         ]
 
+        print("Sending events request with data:", data)
+
         response = await self._method("post", "/runner/", data=data)
+        print("Received events response:", response.json())
 
-        payload = response.json()
-        if payload.get("objects"):
-            for obj in payload["objects"]:
+        payload: dict[str, Any] = cast(dict[str, Any], response.json())
+        objects = cast(List[dict[str, Any]], payload.get("objects") or [])
+        for obj in objects:
 
-                if obj["type"] == "orders_counters":
-                    self._orders_counters_tag = obj["tag"]
+            obj_type = obj.get("type")
+            if obj_type == "orders_counters":
+                self._orders_counters_tag = cast(str, obj.get("tag", self._orders_counters_tag))
 
-                elif obj["type"] == "chat_bookmarks":
-                    self._chat_bookmarks_tag = obj["tag"]
-                    contact_order = obj["data"]["order"]
+            elif obj_type == "chat_bookmarks":
+                self._chat_bookmarks_tag = cast(str, obj.get("tag", self._chat_bookmarks_tag))
+                data_obj_raw = obj.get("data")
+                data_obj = cast(dict[str, Any], data_obj_raw if isinstance(data_obj_raw, dict) else {})
 
-                    loop = asyncio.get_running_loop()
+                contact_order_raw = data_obj.get("order")
+                contact_order = cast(List[Any], contact_order_raw if isinstance(contact_order_raw, list) else [])
 
-                    messages_dict = await loop.run_in_executor(parser_executor, parse_chat_bookmarks, obj["data"]["html"])
-                    for i, contact_id in enumerate(contact_order):
-                        message = messages_dict.get(contact_id)
-                        if message is None:
-                            contact_order[i] = [contact_id, self._chat_bookmarks_data[i][1]]
-                            continue
-                        contact_order[i] = [contact_id, message.last_message_id]
-                        if message.last_message_id != message.last_read_message_id:
-                            contact_order[i].append(message.last_read_message_id)
+                loop = asyncio.get_running_loop()
 
-                    self._chat_bookmarks_data = contact_order
+                message_html = cast(str, data_obj.get("html", ""))
+                messages_dict = await loop.run_in_executor(
+                    parser_executor,
+                    parse_chat_bookmarks,
+                    message_html
+                )
 
-                    if self._chat_bookmarks_data:
-                        for contact_id, last_message_id, *rest in self._chat_bookmarks_data:
-                            self._chat_nodes_data[contact_id] = {
-                                "type": "chat_node",
-                                "id": f"users_{self.account.user_id}_{contact_id}",
-                            }
+                messages_dict = messages_dict or {}
+
+                for i, contact_id in enumerate(contact_order):
+                    if not isinstance(contact_id, int):
+                        continue
+
+                    message = messages_dict.get(contact_id)
+                    if message is None:
+                        if i < len(self._chat_bookmarks_data) and len(self._chat_bookmarks_data[i]) > 1:
+                            self._chat_bookmarks_data[i] = [contact_id, self._chat_bookmarks_data[i][1]]
+                        continue
+
+                    item: List[int] = [contact_id, message.last_message_id]
+                    if message.last_message_id != message.last_read_message_id:
+                        item.append(message.last_read_message_id)
+
+                    if i < len(contact_order):
+                        contact_order[i] = item
+                    else:
+                        contact_order.append(item)
+
+                filtered_chat_bookmarks: List[List[int]] = []
+                for raw_entry in contact_order:
+                    if not isinstance(raw_entry, list):
+                        continue
+
+                    entry = cast(List[Any], raw_entry)
+                    if len(entry) < 2:
+                        continue
+
+                    contact_id = entry[0]
+                    last_message_id = entry[1]
+                    if not isinstance(contact_id, int) or not isinstance(last_message_id, int):
+                        continue
+
+                    filtered_chat_bookmarks.append([contact_id, last_message_id])
+
+                self._chat_bookmarks_data = filtered_chat_bookmarks
+
+                if self._chat_bookmarks_data:
+                    for item in self._chat_bookmarks_data:
+                        contact_id = item[0]
+                        self._chat_nodes_data[contact_id] = {
+                            "type": "chat_node",
+                            "id": f"users_{self.account.user_id}_{contact_id}",
+                        }
+
+                if getattr(self, "_first_run", False):
+                    self._first_run = False
+                    return
+
+                for msg in messages_dict.values():
+                    asyncio.create_task(self.emit("new_message", msg))
 
 
                     if self._first_run:
