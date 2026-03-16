@@ -4,7 +4,7 @@ from typing import Optional, Any, cast
 from selectolax.lexbor import LexborHTMLParser
 from concurrent.futures import ThreadPoolExecutor
 
-from ..types import Category, Subcategory, Contact, ChatBookmarkMessage
+from ..types import Category, ChatNode, Subcategory, Contact, ChatBookmarkMessage
   
 parser_executor = ThreadPoolExecutor()
 
@@ -214,3 +214,28 @@ def parse_chat_bookmarks(html: str) -> Optional[dict[int, ChatBookmarkMessage]]:
         )
 
     return messages
+
+
+#<div class="chat chat-float" data-id="245732163" data-name="users-12423495-19174038" data-user="12423495" data-history="1" data-tag="0oymifmc" data-bookmarks-tag="1jmfjnm7">
+def parse_chat_node(html: str) -> ChatNode:
+    tree = LexborHTMLParser(html)
+    
+    chat_node = tree.css_first("div.chat")
+    data_name = cast(str, chat_node.attributes.get("data-name")) 
+    app_data = parse_appdata(tree)
+    if not app_data:
+        raise ValueError("App data not found in chat node")
+    chat_user_id = "0"
+    for part in data_name.split("-"):
+        if part.isdigit():
+            if app_data["userId"] == int(part):
+                continue
+            chat_user_id = part
+    chat_node_tag = cast(str, chat_node.attributes.get("data-tag"))
+
+    return ChatNode(
+        data_name=data_name,
+        node_id=_parse_int(chat_node.attributes.get("data-id")),
+        user_id=_parse_int(chat_user_id),
+        tag=chat_node_tag
+    )

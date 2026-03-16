@@ -34,3 +34,9 @@ class ChatBookmarkMessage(BaseModel):
     time: str
     unread: bool
     
+class ChatNode(BaseModel):
+    #todo
+    data_name: str
+    node_id: int
+    user_id: int
+    tag: str

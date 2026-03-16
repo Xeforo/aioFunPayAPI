@@ -2,10 +2,10 @@ from asyncio import get_running_loop
 from typing import Optional, Dict, Literal, Any, Union
 from httpx import Cookies, Proxy, AsyncClient, Response
 
-from .types import Contact
+from .types import ChatNode, Contact
 
 from .common.config import BASE_URL, USER_AGENT
-from .common.parser import parse_account_data, parse_contacts, parser_executor
+from .common.parser import parse_account_data, parse_chat_node, parse_contacts, parser_executor
 
  
 class Account:
@@ -82,6 +82,8 @@ class Account:
                 return c
         return None
     
-    async def get_node(self, node_id: int) -> None:
-        # this method was not fully implemented yet in repository.
-        raise NotImplementedError("get_node() is not implemented")
+    async def get_chat_node(self, node_id: int) -> ChatNode:
+        response = await self._method("get", f"/chat/?node={node_id}")
+        loop = get_running_loop()
+        chat_data = await loop.run_in_executor(parser_executor, parse_chat_node, response.text)
+        return chat_data
